@@ -9,6 +9,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace dcc {
 
@@ -17,7 +18,8 @@ struct RuntimeConfig {
     std::string data_path = "/dcc/root/table_data.csv";
     std::string output_dir;
     std::string callback_url = "http://dcc08-data-encrypt.paas.cmbchina.cn/callback";
-    int compute_threads = 4;
+    int job_workers = 4;
+    int compute_threads = 1;
     std::size_t tile_rows = 65536;
     bool callback_enabled = true;
 };
@@ -44,11 +46,11 @@ private:
     std::condition_variable cv_;
     std::queue<EncryptRequest> queue_;
     bool stopping_ = false;
-    std::thread dispatcher_;
+    std::vector<std::thread> workers_;
     std::once_flag warmup_once_;
     std::thread warmup_thread_;
 
-    void dispatcher_loop();
+    void worker_loop(int worker_id);
     void process_with_retry(const EncryptRequest& request);
     void process_once(const EncryptRequest& request);
     void ensure_data_loaded();

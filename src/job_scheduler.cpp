@@ -106,7 +106,8 @@ RuntimeConfig runtime_config_from_env() {
     cfg.data_path = getenv_or("DCC_DATA_PATH", "/dcc/root/table_data.csv");
     cfg.output_dir = getenv_or("DCC_OUTPUT_DIR", "/opt/app/dcc/" + cfg.team_code + "/output/");
     cfg.callback_url = getenv_or("DCC_CALLBACK_URL", "http://dcc08-data-encrypt.paas.cmbchina.cn/callback");
-    cfg.compute_threads = getenv_int_or("DCC_COMPUTE_THREADS", 4);
+    cfg.job_workers = getenv_int_or("DCC_JOB_WORKERS", 4);
+    cfg.compute_threads = getenv_int_or("DCC_COMPUTE_THREADS", 1);
     cfg.tile_rows = getenv_size_or("DCC_TILE_ROWS", 65536);
     cfg.callback_enabled = getenv_or("DCC_DISABLE_CALLBACK", "0") != "1";
     return cfg;
@@ -116,6 +117,7 @@ JobScheduler::JobScheduler(RuntimeConfig config) : config_(std::move(config)) {
     if (config_.output_dir.empty()) {
         config_.output_dir = "/opt/app/dcc/" + config_.team_code + "/output/";
     }
+    config_.job_workers = std::max(1, config_.job_workers);
     config_.compute_threads = std::max(1, config_.compute_threads);
     config_.tile_rows = std::max<std::size_t>(1, config_.tile_rows);
 }
@@ -125,7 +127,10 @@ JobScheduler::~JobScheduler() {
 }
 
 void JobScheduler::start() {
-    dispatcher_ = std::thread(&JobScheduler::dispatcher_loop, this);
+    workers_.reserve(static_cast<std::size_t>(config_.job_workers));
+    for (int i = 0; i < config_.job_workers; ++i) {
+        workers_.emplace_back(&JobScheduler::worker_loop, this, i);
+    }
 }
 
 void JobScheduler::stop() {
@@ -134,9 +139,12 @@ void JobScheduler::stop() {
         stopping_ = true;
     }
     cv_.notify_all();
-    if (dispatcher_.joinable()) {
-        dispatcher_.join();
+    for (auto& worker : workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
     }
+    workers_.clear();
     if (warmup_thread_.joinable()) {
         warmup_thread_.join();
     }
@@ -162,7 +170,7 @@ void JobScheduler::warmup_async() {
     });
 }
 
-void JobScheduler::dispatcher_loop() {
+void JobScheduler::worker_loop(int worker_id) {
     while (true) {
         EncryptRequest request;
         {
@@ -174,6 +182,7 @@ void JobScheduler::dispatcher_loop() {
             request = std::move(queue_.front());
             queue_.pop();
         }
+        (void)worker_id;
         process_with_retry(request);
     }
 }

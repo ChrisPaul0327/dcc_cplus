@@ -1,5 +1,6 @@
 #include "sm4.h"
 
+#include <array>
 #include <cstring>
 #include <stdexcept>
 
@@ -40,6 +41,13 @@ constexpr uint32_t CK[32] = {
 
 constexpr char HEX[] = "0123456789ABCDEF";
 
+struct RoundTables {
+    std::array<uint32_t, 256> t0{};
+    std::array<uint32_t, 256> t1{};
+    std::array<uint32_t, 256> t2{};
+    std::array<uint32_t, 256> t3{};
+};
+
 inline uint32_t rotl(uint32_t x, int n) {
     return (x << n) | (x >> (32 - n));
 }
@@ -73,8 +81,24 @@ inline uint32_t key_l_transform(uint32_t b) {
     return b ^ rotl(b, 13) ^ rotl(b, 23);
 }
 
+RoundTables make_round_tables() {
+    RoundTables tables;
+    for (int i = 0; i < 256; ++i) {
+        const uint32_t b = SBOX[i];
+        tables.t0[static_cast<std::size_t>(i)] = l_transform(b << 24);
+        tables.t1[static_cast<std::size_t>(i)] = l_transform(b << 16);
+        tables.t2[static_cast<std::size_t>(i)] = l_transform(b << 8);
+        tables.t3[static_cast<std::size_t>(i)] = l_transform(b);
+    }
+    return tables;
+}
+
 inline uint32_t round_t(uint32_t x) {
-    return l_transform(tau(x));
+    static const RoundTables tables = make_round_tables();
+    return tables.t0[(x >> 24) & 0xff] ^
+           tables.t1[(x >> 16) & 0xff] ^
+           tables.t2[(x >> 8) & 0xff] ^
+           tables.t3[x & 0xff];
 }
 
 inline uint32_t key_t(uint32_t x) {

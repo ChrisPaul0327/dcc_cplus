@@ -27,6 +27,7 @@ int main() {
         std::cerr << "teamCode=" << config.team_code
                   << " dataPath=" << config.data_path
                   << " outputDir=" << config.output_dir
+                  << " jobWorkers=" << config.job_workers
                   << " computeThreads=" << config.compute_threads
                   << " tileRows=" << config.tile_rows
                   << " callback=" << (config.callback_enabled ? "enabled" : "disabled")
