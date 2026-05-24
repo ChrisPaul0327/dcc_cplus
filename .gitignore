@@ -1,0 +1,16 @@
+.DS_Store
+dcc_encrypt
+tests/test_core
+
+# Local competition data and source problem documents.
+doc/
+
+# Runtime output and logs.
+output/
+*.log
+*.csv
+*.tmp
+
+# Common build scratch directories.
+build/
+cmake-build-*/
