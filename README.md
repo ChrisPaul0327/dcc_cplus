@@ -61,7 +61,8 @@ curl -s -X POST http://127.0.0.1:18080/encrypt \
 - `DCC_CALLBACK_URL`: default `http://dcc08-data-encrypt.paas.cmbchina.cn/callback`.
 - `DCC_JOB_WORKERS`: default `4`, number of concurrent background requests.
 - `DCC_COMPUTE_THREADS`: default `1`, per-request tile workers. Keep this at `1` when `DCC_JOB_WORKERS` is near CPU count.
-- `DCC_TILE_ROWS`: default `65536`.
+- `DCC_QUEUE_COALESCE_MS`: default `0`, optional short background queue batching window for priority scheduling.
+- `DCC_TILE_ROWS`: default `100000`.
 - `DCC_PORT`: default `8080`.
 - `DCC_DISABLE_CALLBACK`: set to `1` only for local testing.
 

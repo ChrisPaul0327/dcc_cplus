@@ -29,6 +29,7 @@ int main() {
                   << " outputDir=" << config.output_dir
                   << " jobWorkers=" << config.job_workers
                   << " computeThreads=" << config.compute_threads
+                  << " queueCoalesceMs=" << config.queue_coalesce_ms
                   << " tileRows=" << config.tile_rows
                   << " callback=" << (config.callback_enabled ? "enabled" : "disabled")
                   << "\n";

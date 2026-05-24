@@ -48,6 +48,10 @@ struct RoundTables {
     std::array<uint32_t, 256> t3{};
 };
 
+struct HexPairs {
+    std::array<std::array<char, 2>, 256> pair{};
+};
+
 inline uint32_t rotl(uint32_t x, int n) {
     return (x << n) | (x >> (32 - n));
 }
@@ -93,6 +97,15 @@ RoundTables make_round_tables() {
     return tables;
 }
 
+HexPairs make_hex_pairs() {
+    HexPairs pairs;
+    for (int i = 0; i < 256; ++i) {
+        pairs.pair[static_cast<std::size_t>(i)][0] = HEX[(i >> 4) & 0x0f];
+        pairs.pair[static_cast<std::size_t>(i)][1] = HEX[i & 0x0f];
+    }
+    return pairs;
+}
+
 inline uint32_t round_t(uint32_t x) {
     static const RoundTables tables = make_round_tables();
     return tables.t0[(x >> 24) & 0xff] ^
@@ -134,12 +147,16 @@ std::string hex_upper(const unsigned char* data, std::size_t len) {
 void hex_upper_append(const unsigned char* data, std::size_t len, std::string& out) {
     const std::size_t base = out.size();
     out.resize(base + len * 2);
-    char* dst = out.data() + base;
+    (void)hex_upper_write(data, len, out.data() + base);
+}
+
+char* hex_upper_write(const unsigned char* data, std::size_t len, char* out) {
+    static const HexPairs pairs = make_hex_pairs();
+    char* dst = out;
     for (std::size_t i = 0; i < len; ++i) {
-        const unsigned char b = data[i];
-        dst[i * 2] = HEX[b >> 4];
-        dst[i * 2 + 1] = HEX[b & 0x0f];
+        std::memcpy(dst + i * 2, pairs.pair[data[i]].data(), 2);
     }
+    return out + len * 2;
 }
 
 void sm4_set_encrypt_key(const unsigned char key[16], Sm4KeySchedule& schedule) {
@@ -154,18 +171,21 @@ void sm4_set_encrypt_key(const unsigned char key[16], Sm4KeySchedule& schedule) 
 }
 
 void sm4_encrypt_block(const unsigned char in[16], unsigned char out[16], const Sm4KeySchedule& schedule) {
-    uint32_t x[36];
-    x[0] = load_be(in);
-    x[1] = load_be(in + 4);
-    x[2] = load_be(in + 8);
-    x[3] = load_be(in + 12);
+    uint32_t x0 = load_be(in);
+    uint32_t x1 = load_be(in + 4);
+    uint32_t x2 = load_be(in + 8);
+    uint32_t x3 = load_be(in + 12);
     for (int i = 0; i < 32; ++i) {
-        x[i + 4] = x[i] ^ round_t(x[i + 1] ^ x[i + 2] ^ x[i + 3] ^ schedule.rk[i]);
+        const uint32_t next = x0 ^ round_t(x1 ^ x2 ^ x3 ^ schedule.rk[i]);
+        x0 = x1;
+        x1 = x2;
+        x2 = x3;
+        x3 = next;
     }
-    store_be(x[35], out);
-    store_be(x[34], out + 4);
-    store_be(x[33], out + 8);
-    store_be(x[32], out + 12);
+    store_be(x3, out);
+    store_be(x2, out + 4);
+    store_be(x1, out + 8);
+    store_be(x0, out + 12);
 }
 
 std::string sm4_cbc_pkcs7_hex(std::string_view plain, const Sm4KeySchedule& schedule) {
@@ -176,6 +196,27 @@ std::string sm4_cbc_pkcs7_hex(std::string_view plain, const Sm4KeySchedule& sche
 }
 
 void sm4_cbc_pkcs7_hex_append(std::string_view plain, const Sm4KeySchedule& schedule, std::string& out) {
+    const std::size_t base = out.size();
+    out.resize(base + ((plain.size() / 16) + 1) * 32);
+    (void)sm4_cbc_pkcs7_hex_write(plain, schedule, out.data() + base);
+}
+
+char* sm4_cbc_pkcs7_hex_write(std::string_view plain, const Sm4KeySchedule& schedule, char* out) {
+    if (plain.size() < 16) {
+        const unsigned char pad = static_cast<unsigned char>(16 - plain.size());
+        unsigned char block[16];
+        unsigned char cipher[16];
+        std::memcpy(block, kSm4CbcIv, 16);
+        for (std::size_t i = 0; i < plain.size(); ++i) {
+            block[i] ^= static_cast<unsigned char>(plain[i]);
+        }
+        for (std::size_t i = plain.size(); i < 16; ++i) {
+            block[i] ^= pad;
+        }
+        sm4_encrypt_block(block, cipher, schedule);
+        return hex_upper_write(cipher, 16, out);
+    }
+
     unsigned char prev[16];
     std::memcpy(prev, kSm4CbcIv, 16);
 
@@ -201,9 +242,10 @@ void sm4_cbc_pkcs7_hex_append(std::string_view plain, const Sm4KeySchedule& sche
             block[i] ^= prev[i];
         }
         sm4_encrypt_block(block, cipher, schedule);
-        hex_upper_append(cipher, 16, out);
+        out = hex_upper_write(cipher, 16, out);
         std::memcpy(prev, cipher, 16);
     }
+    return out;
 }
 
 } // namespace dcc

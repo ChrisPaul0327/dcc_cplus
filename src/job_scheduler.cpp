@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -50,6 +51,30 @@ std::size_t getenv_size_or(const char* name, std::size_t fallback) {
     } catch (...) {
         return fallback;
     }
+}
+
+std::uint64_t field_priority(std::string_view name) {
+    if (name == "device_id" || name == "trans_id") {
+        return 64;
+    }
+    if (name == "business_key") {
+        return 40;
+    }
+    if (name == "user_id" || name == "serial_no" || name == "user_code" || name == "secret_code") {
+        return 32;
+    }
+    if (name == "id_card" || name == "phone" || name == "name" || name == "email") {
+        return 8;
+    }
+    return 16;
+}
+
+std::uint64_t request_priority(const EncryptRequest& request) {
+    std::uint64_t priority = request.fields.empty() ? 1 : request.fields.size();
+    for (const auto& field : request.fields) {
+        priority += field_priority(field);
+    }
+    return priority;
 }
 
 struct ParsedUrl {
@@ -108,7 +133,8 @@ RuntimeConfig runtime_config_from_env() {
     cfg.callback_url = getenv_or("DCC_CALLBACK_URL", "http://dcc08-data-encrypt.paas.cmbchina.cn/callback");
     cfg.job_workers = getenv_int_or("DCC_JOB_WORKERS", 4);
     cfg.compute_threads = getenv_int_or("DCC_COMPUTE_THREADS", 1);
-    cfg.tile_rows = getenv_size_or("DCC_TILE_ROWS", 65536);
+    cfg.queue_coalesce_ms = getenv_int_or("DCC_QUEUE_COALESCE_MS", 0);
+    cfg.tile_rows = getenv_size_or("DCC_TILE_ROWS", 100000);
     cfg.callback_enabled = getenv_or("DCC_DISABLE_CALLBACK", "0") != "1";
     return cfg;
 }
@@ -153,7 +179,7 @@ void JobScheduler::stop() {
 void JobScheduler::enqueue(EncryptRequest request) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push(std::move(request));
+        queue_.push(QueuedJob{request_priority(request), next_sequence_++, std::move(request)});
     }
     cv_.notify_one();
 }
@@ -179,7 +205,18 @@ void JobScheduler::worker_loop(int worker_id) {
             if (stopping_ && queue_.empty()) {
                 return;
             }
-            request = std::move(queue_.front());
+            if (config_.queue_coalesce_ms > 0 && queue_.size() < static_cast<std::size_t>(config_.job_workers * 2)) {
+                cv_.wait_for(lock, std::chrono::milliseconds(config_.queue_coalesce_ms), [&] {
+                    return stopping_;
+                });
+                if (stopping_ && queue_.empty()) {
+                    return;
+                }
+                if (queue_.empty()) {
+                    continue;
+                }
+            }
+            request = queue_.top().request;
             queue_.pop();
         }
         (void)worker_id;
