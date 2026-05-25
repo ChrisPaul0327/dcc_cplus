@@ -73,9 +73,9 @@ Update `DCC_TEAM_CODE` and paths to your team directory before packaging. Do not
 default and sent after each output file is closed and renamed.
 
 ```bash
-nohup env DCC_TEAM_CODE=teamXXX \
+nohup env DCC_TEAM_CODE=team012 \
 DCC_DATA_PATH=/dcc/root/table_data.csv \
 DCC_CALLBACK_URL=http://dcc08-data-encrypt.paas.cmbchina.cn/callback \
 DCC_PORT=8080 \
-/opt/app/dcc/teamXXX/dcc_encrypt > /opt/app/dcc/teamXXX/dcc.log 2>&1 &
+/opt/app/dcc/team012/dcc_encrypt > /opt/app/dcc/team012/dcc.log 2>&1 &
 ```
