@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -22,8 +23,11 @@ struct RuntimeConfig {
     int job_workers = 4;
     int compute_threads = 1;
     int queue_coalesce_ms = 0;
+    int write_workers = 4;
     std::size_t tile_rows = 100000;
+    std::size_t early_max_buffered_jobs = 128;
     bool callback_enabled = true;
+    bool early_callback = false;
 };
 
 struct QueuedJob {
@@ -68,11 +72,29 @@ private:
     std::once_flag warmup_once_;
     std::thread warmup_thread_;
 
+    struct PendingWrite {
+        std::string request_id;
+        std::string final_path;
+        std::string tmp_path;
+        std::string data;
+    };
+
+    std::mutex write_mutex_;
+    std::condition_variable write_cv_;
+    std::condition_variable write_space_cv_;
+    std::deque<PendingWrite> write_queue_;
+    bool writer_stopping_ = false;
+    std::vector<std::thread> write_workers_;
+
     void worker_loop(int worker_id);
+    void writer_loop(int writer_id);
     void process_with_retry(const EncryptRequest& request);
     void process_once(const EncryptRequest& request);
     void ensure_data_loaded();
 
+    std::string render_to_memory(const std::vector<FieldRef>& fields, const Sm4KeySchedule& schedule) const;
+    void enqueue_write(PendingWrite write);
+    void write_output_file(const std::string& tmp_path, const std::string& final_path, const std::string& data) const;
     void write_all(int fd, const char* data, std::size_t len) const;
     void callback_until_success(const EncryptRequest& request) const;
 };

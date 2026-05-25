@@ -134,8 +134,11 @@ RuntimeConfig runtime_config_from_env() {
     cfg.job_workers = getenv_int_or("DCC_JOB_WORKERS", 4);
     cfg.compute_threads = getenv_int_or("DCC_COMPUTE_THREADS", 1);
     cfg.queue_coalesce_ms = getenv_int_or("DCC_QUEUE_COALESCE_MS", 0);
+    cfg.write_workers = getenv_int_or("DCC_WRITE_WORKERS", 4);
     cfg.tile_rows = getenv_size_or("DCC_TILE_ROWS", 100000);
+    cfg.early_max_buffered_jobs = getenv_size_or("DCC_EARLY_MAX_BUFFERED_JOBS", 128);
     cfg.callback_enabled = getenv_or("DCC_DISABLE_CALLBACK", "0") != "1";
+    cfg.early_callback = getenv_or("DCC_EARLY_CALLBACK", "0") == "1";
     return cfg;
 }
 
@@ -145,7 +148,9 @@ JobScheduler::JobScheduler(RuntimeConfig config) : config_(std::move(config)) {
     }
     config_.job_workers = std::max(1, config_.job_workers);
     config_.compute_threads = std::max(1, config_.compute_threads);
+    config_.write_workers = std::max(1, config_.write_workers);
     config_.tile_rows = std::max<std::size_t>(1, config_.tile_rows);
+    config_.early_max_buffered_jobs = std::max<std::size_t>(1, config_.early_max_buffered_jobs);
 }
 
 JobScheduler::~JobScheduler() {
@@ -156,6 +161,12 @@ void JobScheduler::start() {
     workers_.reserve(static_cast<std::size_t>(config_.job_workers));
     for (int i = 0; i < config_.job_workers; ++i) {
         workers_.emplace_back(&JobScheduler::worker_loop, this, i);
+    }
+    if (config_.early_callback && config_.callback_enabled) {
+        write_workers_.reserve(static_cast<std::size_t>(config_.write_workers));
+        for (int i = 0; i < config_.write_workers; ++i) {
+            write_workers_.emplace_back(&JobScheduler::writer_loop, this, i);
+        }
     }
 }
 
@@ -174,6 +185,18 @@ void JobScheduler::stop() {
     if (warmup_thread_.joinable()) {
         warmup_thread_.join();
     }
+    {
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        writer_stopping_ = true;
+    }
+    write_cv_.notify_all();
+    write_space_cv_.notify_all();
+    for (auto& worker : write_workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    write_workers_.clear();
 }
 
 void JobScheduler::enqueue(EncryptRequest request) {
@@ -224,6 +247,34 @@ void JobScheduler::worker_loop(int worker_id) {
     }
 }
 
+void JobScheduler::writer_loop(int writer_id) {
+    while (true) {
+        PendingWrite write;
+        {
+            std::unique_lock<std::mutex> lock(write_mutex_);
+            write_cv_.wait(lock, [&] { return writer_stopping_ || !write_queue_.empty(); });
+            if (write_queue_.empty()) {
+                return;
+            }
+            write = std::move(write_queue_.front());
+            write_queue_.pop_front();
+        }
+        write_space_cv_.notify_one();
+
+        for (;;) {
+            try {
+                write_output_file(write.tmp_path, write.final_path, write.data);
+                std::cerr << "writer " << writer_id << " generated " << write.final_path << "\n";
+                break;
+            } catch (const std::exception& e) {
+                std::cerr << "write failed, will retry requestId=" << write.request_id
+                          << " error=" << e.what() << "\n";
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    }
+}
+
 void JobScheduler::process_with_retry(const EncryptRequest& request) {
     for (;;) {
         try {
@@ -258,6 +309,17 @@ void JobScheduler::process_once(const EncryptRequest& request) {
     std::filesystem::create_directories(config_.output_dir);
     const std::string final_path = config_.output_dir + "/" + request.request_id + ".csv";
     const std::string tmp_path = final_path + ".tmp";
+
+    if (config_.early_callback && config_.callback_enabled) {
+        std::string rendered = render_to_memory(fields, schedule);
+        callback_until_success(request);
+        enqueue_write(PendingWrite{request.request_id, final_path, tmp_path, std::move(rendered)});
+        const auto job_end = std::chrono::steady_clock::now();
+        std::cerr << "job callback-complete requestId=" << request.request_id
+                  << " ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(job_end - job_start).count()
+                  << "\n";
+        return;
+    }
 
     const int fd = ::open(tmp_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
     if (fd < 0) {
@@ -316,6 +378,84 @@ void JobScheduler::process_once(const EncryptRequest& request) {
     std::cerr << "job complete requestId=" << request.request_id
               << " ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(job_end - job_start).count()
               << "\n";
+}
+
+std::string JobScheduler::render_to_memory(const std::vector<FieldRef>& fields, const Sm4KeySchedule& schedule) const {
+    const std::size_t total_rows = store_.row_count();
+    const int threads = std::max(1, std::min<int>(config_.compute_threads, static_cast<int>(total_rows == 0 ? 1 : total_rows)));
+
+    std::string rendered;
+    rendered.reserve(total_rows * std::max<std::size_t>(64, fields.size() * 48));
+
+    for (std::size_t tile_begin = 0; tile_begin < total_rows; tile_begin += config_.tile_rows) {
+        const std::size_t tile_end = std::min(total_rows, tile_begin + config_.tile_rows);
+        const std::size_t tile_count = tile_end - tile_begin;
+        const int active_threads = std::max(1, std::min<int>(threads, static_cast<int>(tile_count)));
+
+        std::vector<std::string> parts(static_cast<std::size_t>(active_threads));
+        std::vector<std::thread> workers;
+        workers.reserve(static_cast<std::size_t>(active_threads - 1));
+
+        auto render_part = [&](int tid) {
+            const std::size_t begin = tile_begin + (tile_count * static_cast<std::size_t>(tid)) / active_threads;
+            const std::size_t end = tile_begin + (tile_count * static_cast<std::size_t>(tid + 1)) / active_threads;
+            std::string& part = parts[static_cast<std::size_t>(tid)];
+            part.reserve((end - begin) * std::max<std::size_t>(64, fields.size() * 48));
+            for (std::size_t row = begin; row < end; ++row) {
+                store_.append_rendered_row(row, fields, schedule, part);
+            }
+        };
+
+        for (int tid = 1; tid < active_threads; ++tid) {
+            workers.emplace_back(render_part, tid);
+        }
+        render_part(0);
+        for (auto& worker : workers) {
+            worker.join();
+        }
+        for (const auto& part : parts) {
+            rendered.append(part);
+        }
+    }
+    return rendered;
+}
+
+void JobScheduler::enqueue_write(PendingWrite write) {
+    {
+        std::unique_lock<std::mutex> lock(write_mutex_);
+        write_space_cv_.wait(lock, [&] {
+            return writer_stopping_ || write_queue_.size() < config_.early_max_buffered_jobs;
+        });
+        if (writer_stopping_) {
+            throw std::runtime_error("writer queue stopped");
+        }
+        write_queue_.push_back(std::move(write));
+    }
+    write_cv_.notify_one();
+}
+
+void JobScheduler::write_output_file(const std::string& tmp_path,
+                                     const std::string& final_path,
+                                     const std::string& data) const {
+    std::filesystem::create_directories(config_.output_dir);
+    const int fd = ::open(tmp_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    if (fd < 0) {
+        throw std::runtime_error("failed to open output file: " + tmp_path + ": " + std::strerror(errno));
+    }
+
+    try {
+        write_all(fd, data.data(), data.size());
+        if (::close(fd) != 0) {
+            throw std::runtime_error("failed to close output file: " + std::string(std::strerror(errno)));
+        }
+    } catch (...) {
+        ::close(fd);
+        throw;
+    }
+
+    if (::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
+        throw std::runtime_error("failed to rename output file: " + std::string(std::strerror(errno)));
+    }
 }
 
 void JobScheduler::write_all(int fd, const char* data, std::size_t len) const {

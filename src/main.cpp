@@ -30,8 +30,11 @@ int main() {
                   << " jobWorkers=" << config.job_workers
                   << " computeThreads=" << config.compute_threads
                   << " queueCoalesceMs=" << config.queue_coalesce_ms
+                  << " writeWorkers=" << config.write_workers
                   << " tileRows=" << config.tile_rows
                   << " callback=" << (config.callback_enabled ? "enabled" : "disabled")
+                  << " earlyCallback=" << (config.early_callback ? "enabled" : "disabled")
+                  << " earlyMaxBufferedJobs=" << config.early_max_buffered_jobs
                   << "\n";
 
         dcc::JobScheduler scheduler(config);

@@ -21,7 +21,8 @@ This implementation keeps the competition constraints unchanged:
 - `/encrypt` only parses the request and enqueues a job.
 - Jobs are processed by a dispatcher to avoid 100 requests fighting for disk.
 - Each job renders row tiles with multiple compute threads, then writes tile buffers in order.
-- Files are written as `requestId.csv.tmp`, closed, renamed to `requestId.csv`, then callback is sent.
+- By default, files are written as `requestId.csv.tmp`, closed, renamed to `requestId.csv`, then callback is sent.
+- Optional aggressive mode renders each whole result into memory, sends callback, then lets background writer threads flush the CSV to disk.
 - SM4 uses an in-process scalar T-table style implementation with uppercase hex output.
 
 The SM4 API is isolated in `src/sm4.*`, so an AVX2/AVX512 batch kernel can replace the scalar block routine later without touching HTTP or output protocol code.
@@ -63,6 +64,9 @@ curl -s -X POST http://127.0.0.1:18080/encrypt \
 - `DCC_COMPUTE_THREADS`: default `1`, per-request tile workers. Keep this at `1` when `DCC_JOB_WORKERS` is near CPU count.
 - `DCC_QUEUE_COALESCE_MS`: default `0`, optional short background queue batching window for priority scheduling.
 - `DCC_TILE_ROWS`: default `100000`.
+- `DCC_EARLY_CALLBACK`: default `0`. Set to `1` to callback immediately after a complete in-memory CSV is rendered.
+- `DCC_WRITE_WORKERS`: default `4`, only used by `DCC_EARLY_CALLBACK=1`.
+- `DCC_EARLY_MAX_BUFFERED_JOBS`: default `128`, maximum completed in-memory CSV buffers waiting for writer threads.
 - `DCC_PORT`: default `8080`.
 - `DCC_DISABLE_CALLBACK`: set to `1` only for local testing.
 
@@ -70,7 +74,9 @@ curl -s -X POST http://127.0.0.1:18080/encrypt \
 
 Update `DCC_TEAM_CODE` and paths to your team directory before packaging. Do not set
 `DCC_DISABLE_CALLBACK=1` in the competition environment; callback is enabled by
-default and sent after each output file is closed and renamed.
+default and sent after each output file is closed and renamed. For the aggressive
+early-callback experiment, add `DCC_EARLY_CALLBACK=1`; only use it if the contest
+judge accepts callback before the CSV is visible on disk.
 
 ```bash
 nohup env DCC_TEAM_CODE=team012 \
