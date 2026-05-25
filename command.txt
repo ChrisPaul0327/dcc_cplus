@@ -1,1 +1,1 @@
-nohup env DCC_TEAM_CODE=teamXXX DCC_DATA_PATH=/dcc/root/table_data.csv DCC_PORT=8080 /opt/app/dcc/teamXXX/dcc_encrypt > /opt/app/dcc/teamXXX/dcc.log 2>&1 &
+nohup env DCC_TEAM_CODE=teamXXX DCC_DATA_PATH=/dcc/root/table_data.csv DCC_CALLBACK_URL=http://dcc08-data-encrypt.paas.cmbchina.cn/callback DCC_PORT=8080 /opt/app/dcc/teamXXX/dcc_encrypt > /opt/app/dcc/teamXXX/dcc.log 2>&1 &
