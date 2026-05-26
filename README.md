@@ -70,6 +70,17 @@ curl -s -X POST http://127.0.0.1:18080/encrypt \
 - `DCC_PORT`: default `8080`.
 - `DCC_DISABLE_CALLBACK`: set to `1` only for local testing.
 
+## Timing Logs
+
+The service writes timing diagnostics to stderr, so the submit command redirects
+them into `dcc.log`. Each request emits `timing requestId=...` lines for queue
+wait, data load, field resolution, SM4 key schedule, render, callback,
+background writer queue wait, file write, rename, and total time. Example:
+
+```text
+timing requestId=REQ_1 stage=render_to_memory start="2026-05-26 10:20:06.053" end="2026-05-26 10:20:06.331" ms=277.855 rows=300000 bytes=42123456 fieldCount=4
+```
+
 ## Submit Command Template
 
 Do not set `DCC_DISABLE_CALLBACK=1` in the competition environment. Callback is

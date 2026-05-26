@@ -4,8 +4,12 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
+#include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
@@ -20,6 +24,9 @@
 
 namespace dcc {
 namespace {
+
+using SteadyTime = std::chrono::steady_clock::time_point;
+using WallTime = std::chrono::system_clock::time_point;
 
 std::string getenv_or(const char* name, const std::string& fallback) {
     const char* value = std::getenv(name);
@@ -51,6 +58,54 @@ std::size_t getenv_size_or(const char* name, std::size_t fallback) {
     } catch (...) {
         return fallback;
     }
+}
+
+double elapsed_ms(SteadyTime start, SteadyTime end) {
+    return static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()) / 1000.0;
+}
+
+std::string format_wall_time(WallTime time) {
+    const auto since_epoch = time.time_since_epoch();
+    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(since_epoch).count() % 1000;
+    const std::time_t raw = std::chrono::system_clock::to_time_t(time);
+    std::tm tm{};
+    localtime_r(&raw, &tm);
+
+    std::ostringstream out;
+    out << std::put_time(&tm, "%Y-%m-%d %H:%M:%S")
+        << '.' << std::setw(3) << std::setfill('0') << millis;
+    return out.str();
+}
+
+std::mutex& log_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+void log_timing(const std::string& request_id,
+                const std::string& stage,
+                WallTime start_wall,
+                WallTime end_wall,
+                SteadyTime start_steady,
+                SteadyTime end_steady,
+                const std::string& extra = {}) {
+    std::ostringstream line;
+    line << "timing requestId=" << request_id
+         << " stage=" << stage
+         << " start=\"" << format_wall_time(start_wall) << "\""
+         << " end=\"" << format_wall_time(end_wall) << "\""
+         << " ms=" << std::fixed << std::setprecision(3) << elapsed_ms(start_steady, end_steady);
+    if (!extra.empty()) {
+        line << ' ' << extra;
+    }
+    std::lock_guard<std::mutex> lock(log_mutex());
+    std::cerr << line.str() << "\n";
+}
+
+void log_timing_now(const std::string& request_id, const std::string& stage, const std::string& extra = {}) {
+    const auto steady = std::chrono::steady_clock::now();
+    const auto wall = std::chrono::system_clock::now();
+    log_timing(request_id, stage, wall, wall, steady, steady, extra);
 }
 
 std::uint64_t field_priority(std::string_view name) {
@@ -200,11 +255,24 @@ void JobScheduler::stop() {
 }
 
 void JobScheduler::enqueue(EncryptRequest request) {
+    const auto enqueue_start_steady = std::chrono::steady_clock::now();
+    const auto enqueue_start_wall = std::chrono::system_clock::now();
+    const std::uint64_t priority = request_priority(request);
+    std::size_t queue_depth = 0;
+    const std::string request_id = request.request_id;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push(QueuedJob{request_priority(request), next_sequence_++, std::move(request)});
+        queue_.push(QueuedJob{priority, next_sequence_++, enqueue_start_steady, enqueue_start_wall, std::move(request)});
+        queue_depth = queue_.size();
     }
     cv_.notify_one();
+    const auto enqueue_end_steady = std::chrono::steady_clock::now();
+    const auto enqueue_end_wall = std::chrono::system_clock::now();
+    log_timing(request_id, "enqueue",
+               enqueue_start_wall, enqueue_end_wall,
+               enqueue_start_steady, enqueue_end_steady,
+               "priority=" + std::to_string(priority) +
+                   " queueDepth=" + std::to_string(queue_depth));
 }
 
 void JobScheduler::warmup_async() {
@@ -221,7 +289,7 @@ void JobScheduler::warmup_async() {
 
 void JobScheduler::worker_loop(int worker_id) {
     while (true) {
-        EncryptRequest request;
+        QueuedJob job;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [&] { return stopping_ || !queue_.empty(); });
@@ -239,11 +307,16 @@ void JobScheduler::worker_loop(int worker_id) {
                     continue;
                 }
             }
-            request = queue_.top().request;
+            job = queue_.top();
             queue_.pop();
         }
-        (void)worker_id;
-        process_with_retry(request);
+        const auto dequeue_steady = std::chrono::steady_clock::now();
+        const auto dequeue_wall = std::chrono::system_clock::now();
+        log_timing(job.request.request_id, "queue_wait",
+                   job.enqueue_wall, dequeue_wall,
+                   job.enqueue_steady, dequeue_steady,
+                   "worker=" + std::to_string(worker_id));
+        process_with_retry(job.request, worker_id);
     }
 }
 
@@ -263,7 +336,14 @@ void JobScheduler::writer_loop(int writer_id) {
 
         for (;;) {
             try {
-                write_output_file(write.tmp_path, write.final_path, write.data);
+                const auto dequeue_steady = std::chrono::steady_clock::now();
+                const auto dequeue_wall = std::chrono::system_clock::now();
+                log_timing(write.request_id, "write_queue_wait",
+                           write.enqueue_wall, dequeue_wall,
+                           write.enqueue_steady, dequeue_steady,
+                           "writer=" + std::to_string(writer_id) +
+                               " bytes=" + std::to_string(write.data.size()));
+                write_output_file(write, writer_id);
                 std::cerr << "writer " << writer_id << " generated " << write.final_path << "\n";
                 break;
             } catch (const std::exception& e) {
@@ -275,9 +355,10 @@ void JobScheduler::writer_loop(int writer_id) {
     }
 }
 
-void JobScheduler::process_with_retry(const EncryptRequest& request) {
+void JobScheduler::process_with_retry(const EncryptRequest& request, int worker_id) {
     for (;;) {
         try {
+            log_timing_now(request.request_id, "worker_start", "worker=" + std::to_string(worker_id));
             process_once(request);
             return;
         } catch (const std::exception& e) {
@@ -300,36 +381,109 @@ void JobScheduler::ensure_data_loaded() {
 
 void JobScheduler::process_once(const EncryptRequest& request) {
     const auto job_start = std::chrono::steady_clock::now();
+    const auto job_start_wall = std::chrono::system_clock::now();
+
+    auto stage_start = std::chrono::steady_clock::now();
+    auto stage_start_wall = std::chrono::system_clock::now();
     ensure_data_loaded();
+    auto stage_end = std::chrono::steady_clock::now();
+    auto stage_end_wall = std::chrono::system_clock::now();
+    log_timing(request.request_id, "ensure_data_loaded",
+               stage_start_wall, stage_end_wall, stage_start, stage_end,
+               "rows=" + std::to_string(store_.row_count()));
+
+    stage_start = std::chrono::steady_clock::now();
+    stage_start_wall = std::chrono::system_clock::now();
     const auto fields = store_.resolve_fields(request.fields);
+    stage_end = std::chrono::steady_clock::now();
+    stage_end_wall = std::chrono::system_clock::now();
+    log_timing(request.request_id, "resolve_fields",
+               stage_start_wall, stage_end_wall, stage_start, stage_end,
+               "fieldCount=" + std::to_string(fields.size()));
 
     Sm4KeySchedule schedule;
+    stage_start = std::chrono::steady_clock::now();
+    stage_start_wall = std::chrono::system_clock::now();
     sm4_set_encrypt_key(reinterpret_cast<const unsigned char*>(request.sm4_key.data()), schedule);
+    stage_end = std::chrono::steady_clock::now();
+    stage_end_wall = std::chrono::system_clock::now();
+    log_timing(request.request_id, "sm4_key_schedule",
+               stage_start_wall, stage_end_wall, stage_start, stage_end);
 
+    stage_start = std::chrono::steady_clock::now();
+    stage_start_wall = std::chrono::system_clock::now();
     std::filesystem::create_directories(config_.output_dir);
+    stage_end = std::chrono::steady_clock::now();
+    stage_end_wall = std::chrono::system_clock::now();
+    log_timing(request.request_id, "create_output_dir",
+               stage_start_wall, stage_end_wall, stage_start, stage_end,
+               "dir=" + config_.output_dir);
+
     const std::string final_path = config_.output_dir + "/" + request.request_id + ".csv";
     const std::string tmp_path = final_path + ".tmp";
 
     if (config_.early_callback && config_.callback_enabled) {
+        stage_start = std::chrono::steady_clock::now();
+        stage_start_wall = std::chrono::system_clock::now();
         std::string rendered = render_to_memory(fields, schedule);
+        stage_end = std::chrono::steady_clock::now();
+        stage_end_wall = std::chrono::system_clock::now();
+        const std::size_t rendered_bytes = rendered.size();
+        log_timing(request.request_id, "render_to_memory",
+                   stage_start_wall, stage_end_wall, stage_start, stage_end,
+                   "rows=" + std::to_string(store_.row_count()) +
+                       " bytes=" + std::to_string(rendered_bytes) +
+                       " fieldCount=" + std::to_string(fields.size()));
+
+        stage_start = std::chrono::steady_clock::now();
+        stage_start_wall = std::chrono::system_clock::now();
         callback_until_success(request);
-        enqueue_write(PendingWrite{request.request_id, final_path, tmp_path, std::move(rendered)});
+        stage_end = std::chrono::steady_clock::now();
+        stage_end_wall = std::chrono::system_clock::now();
+        log_timing(request.request_id, "callback",
+                   stage_start_wall, stage_end_wall, stage_start, stage_end,
+                   "url=" + config_.callback_url);
+
+        stage_start = std::chrono::steady_clock::now();
+        stage_start_wall = std::chrono::system_clock::now();
+        enqueue_write(PendingWrite{request.request_id, final_path, tmp_path, std::move(rendered), {}, {}});
+        stage_end = std::chrono::steady_clock::now();
+        stage_end_wall = std::chrono::system_clock::now();
+        log_timing(request.request_id, "enqueue_background_write",
+                   stage_start_wall, stage_end_wall, stage_start, stage_end,
+                   "bytes=" + std::to_string(rendered_bytes));
         const auto job_end = std::chrono::steady_clock::now();
+        const auto job_end_wall = std::chrono::system_clock::now();
         std::cerr << "job callback-complete requestId=" << request.request_id
                   << " ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(job_end - job_start).count()
                   << "\n";
+        log_timing(request.request_id, "job_callback_path_total",
+                   job_start_wall, job_end_wall, job_start, job_end,
+                   "rows=" + std::to_string(store_.row_count()) +
+                       " bytes=" + std::to_string(rendered_bytes) +
+                       " workerPath=early_callback");
         return;
     }
 
+    stage_start = std::chrono::steady_clock::now();
+    stage_start_wall = std::chrono::system_clock::now();
     const int fd = ::open(tmp_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    stage_end = std::chrono::steady_clock::now();
+    stage_end_wall = std::chrono::system_clock::now();
     if (fd < 0) {
         throw std::runtime_error("failed to open output file: " + tmp_path + ": " + std::strerror(errno));
     }
+    log_timing(request.request_id, "file_open",
+               stage_start_wall, stage_end_wall, stage_start, stage_end,
+               "path=" + tmp_path);
 
     const std::size_t total_rows = store_.row_count();
     const int threads = std::max(1, std::min<int>(config_.compute_threads, static_cast<int>(total_rows == 0 ? 1 : total_rows)));
+    std::size_t rendered_bytes = 0;
 
     try {
+        stage_start = std::chrono::steady_clock::now();
+        stage_start_wall = std::chrono::system_clock::now();
         for (std::size_t tile_begin = 0; tile_begin < total_rows; tile_begin += config_.tile_rows) {
             const std::size_t tile_end = std::min(total_rows, tile_begin + config_.tile_rows);
             const std::size_t tile_count = tile_end - tile_begin;
@@ -357,27 +511,64 @@ void JobScheduler::process_once(const EncryptRequest& request) {
                 worker.join();
             }
             for (const auto& part : parts) {
+                rendered_bytes += part.size();
                 write_all(fd, part.data(), part.size());
             }
         }
+        stage_end = std::chrono::steady_clock::now();
+        stage_end_wall = std::chrono::system_clock::now();
+        log_timing(request.request_id, "render_and_write_tiles",
+                   stage_start_wall, stage_end_wall, stage_start, stage_end,
+                   "rows=" + std::to_string(total_rows) +
+                       " bytes=" + std::to_string(rendered_bytes) +
+                       " fieldCount=" + std::to_string(fields.size()) +
+                       " computeThreads=" + std::to_string(threads));
+
+        stage_start = std::chrono::steady_clock::now();
+        stage_start_wall = std::chrono::system_clock::now();
         if (::close(fd) != 0) {
             throw std::runtime_error("failed to close output file: " + std::string(std::strerror(errno)));
         }
+        stage_end = std::chrono::steady_clock::now();
+        stage_end_wall = std::chrono::system_clock::now();
+        log_timing(request.request_id, "file_close",
+                   stage_start_wall, stage_end_wall, stage_start, stage_end,
+                   "path=" + tmp_path);
     } catch (...) {
         ::close(fd);
         throw;
     }
 
+    stage_start = std::chrono::steady_clock::now();
+    stage_start_wall = std::chrono::system_clock::now();
     if (::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
         throw std::runtime_error("failed to rename output file: " + std::string(std::strerror(errno)));
     }
+    stage_end = std::chrono::steady_clock::now();
+    stage_end_wall = std::chrono::system_clock::now();
+    log_timing(request.request_id, "file_rename",
+               stage_start_wall, stage_end_wall, stage_start, stage_end,
+               "finalPath=" + final_path);
 
     std::cerr << "generated " << final_path << "\n";
+    stage_start = std::chrono::steady_clock::now();
+    stage_start_wall = std::chrono::system_clock::now();
     callback_until_success(request);
+    stage_end = std::chrono::steady_clock::now();
+    stage_end_wall = std::chrono::system_clock::now();
+    log_timing(request.request_id, "callback",
+               stage_start_wall, stage_end_wall, stage_start, stage_end,
+               "url=" + config_.callback_url);
     const auto job_end = std::chrono::steady_clock::now();
+    const auto job_end_wall = std::chrono::system_clock::now();
     std::cerr << "job complete requestId=" << request.request_id
               << " ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(job_end - job_start).count()
               << "\n";
+    log_timing(request.request_id, "job_conservative_path_total",
+               job_start_wall, job_end_wall, job_start, job_end,
+               "rows=" + std::to_string(total_rows) +
+                   " bytes=" + std::to_string(rendered_bytes) +
+                   " workerPath=conservative");
 }
 
 std::string JobScheduler::render_to_memory(const std::vector<FieldRef>& fields, const Sm4KeySchedule& schedule) const {
@@ -429,33 +620,85 @@ void JobScheduler::enqueue_write(PendingWrite write) {
         if (writer_stopping_) {
             throw std::runtime_error("writer queue stopped");
         }
+        write.enqueue_steady = std::chrono::steady_clock::now();
+        write.enqueue_wall = std::chrono::system_clock::now();
         write_queue_.push_back(std::move(write));
     }
     write_cv_.notify_one();
 }
 
-void JobScheduler::write_output_file(const std::string& tmp_path,
-                                     const std::string& final_path,
-                                     const std::string& data) const {
+void JobScheduler::write_output_file(const PendingWrite& write, int writer_id) const {
+    const auto total_start_steady = std::chrono::steady_clock::now();
+    const auto total_start_wall = std::chrono::system_clock::now();
+
+    auto stage_start = std::chrono::steady_clock::now();
+    auto stage_start_wall = std::chrono::system_clock::now();
     std::filesystem::create_directories(config_.output_dir);
-    const int fd = ::open(tmp_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    auto stage_end = std::chrono::steady_clock::now();
+    auto stage_end_wall = std::chrono::system_clock::now();
+    log_timing(write.request_id, "writer_create_output_dir",
+               stage_start_wall, stage_end_wall, stage_start, stage_end,
+               "writer=" + std::to_string(writer_id) +
+                   " dir=" + config_.output_dir);
+
+    stage_start = std::chrono::steady_clock::now();
+    stage_start_wall = std::chrono::system_clock::now();
+    const int fd = ::open(write.tmp_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    stage_end = std::chrono::steady_clock::now();
+    stage_end_wall = std::chrono::system_clock::now();
     if (fd < 0) {
-        throw std::runtime_error("failed to open output file: " + tmp_path + ": " + std::strerror(errno));
+        throw std::runtime_error("failed to open output file: " + write.tmp_path + ": " + std::strerror(errno));
     }
+    log_timing(write.request_id, "writer_file_open",
+               stage_start_wall, stage_end_wall, stage_start, stage_end,
+               "writer=" + std::to_string(writer_id) +
+                   " path=" + write.tmp_path);
 
     try {
-        write_all(fd, data.data(), data.size());
+        stage_start = std::chrono::steady_clock::now();
+        stage_start_wall = std::chrono::system_clock::now();
+        write_all(fd, write.data.data(), write.data.size());
+        stage_end = std::chrono::steady_clock::now();
+        stage_end_wall = std::chrono::system_clock::now();
+        log_timing(write.request_id, "writer_file_write",
+                   stage_start_wall, stage_end_wall, stage_start, stage_end,
+                   "writer=" + std::to_string(writer_id) +
+                       " bytes=" + std::to_string(write.data.size()));
+
+        stage_start = std::chrono::steady_clock::now();
+        stage_start_wall = std::chrono::system_clock::now();
         if (::close(fd) != 0) {
             throw std::runtime_error("failed to close output file: " + std::string(std::strerror(errno)));
         }
+        stage_end = std::chrono::steady_clock::now();
+        stage_end_wall = std::chrono::system_clock::now();
+        log_timing(write.request_id, "writer_file_close",
+                   stage_start_wall, stage_end_wall, stage_start, stage_end,
+                   "writer=" + std::to_string(writer_id) +
+                       " path=" + write.tmp_path);
     } catch (...) {
         ::close(fd);
         throw;
     }
 
-    if (::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
+    stage_start = std::chrono::steady_clock::now();
+    stage_start_wall = std::chrono::system_clock::now();
+    if (::rename(write.tmp_path.c_str(), write.final_path.c_str()) != 0) {
         throw std::runtime_error("failed to rename output file: " + std::string(std::strerror(errno)));
     }
+    stage_end = std::chrono::steady_clock::now();
+    stage_end_wall = std::chrono::system_clock::now();
+    log_timing(write.request_id, "writer_file_rename",
+               stage_start_wall, stage_end_wall, stage_start, stage_end,
+               "writer=" + std::to_string(writer_id) +
+                   " finalPath=" + write.final_path);
+
+    const auto total_end_steady = std::chrono::steady_clock::now();
+    const auto total_end_wall = std::chrono::system_clock::now();
+    log_timing(write.request_id, "writer_total",
+               total_start_wall, total_end_wall, total_start_steady, total_end_steady,
+               "writer=" + std::to_string(writer_id) +
+                   " bytes=" + std::to_string(write.data.size()));
 }
 
 void JobScheduler::write_all(int fd, const char* data, std::size_t len) const {

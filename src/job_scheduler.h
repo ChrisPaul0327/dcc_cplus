@@ -3,6 +3,7 @@
 #include "data_store.h"
 #include "request.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -33,6 +34,8 @@ struct RuntimeConfig {
 struct QueuedJob {
     std::uint64_t priority = 0;
     std::uint64_t sequence = 0;
+    std::chrono::steady_clock::time_point enqueue_steady;
+    std::chrono::system_clock::time_point enqueue_wall;
     EncryptRequest request;
 };
 
@@ -77,6 +80,8 @@ private:
         std::string final_path;
         std::string tmp_path;
         std::string data;
+        std::chrono::steady_clock::time_point enqueue_steady;
+        std::chrono::system_clock::time_point enqueue_wall;
     };
 
     std::mutex write_mutex_;
@@ -88,13 +93,13 @@ private:
 
     void worker_loop(int worker_id);
     void writer_loop(int writer_id);
-    void process_with_retry(const EncryptRequest& request);
+    void process_with_retry(const EncryptRequest& request, int worker_id);
     void process_once(const EncryptRequest& request);
     void ensure_data_loaded();
 
     std::string render_to_memory(const std::vector<FieldRef>& fields, const Sm4KeySchedule& schedule) const;
     void enqueue_write(PendingWrite write);
-    void write_output_file(const std::string& tmp_path, const std::string& final_path, const std::string& data) const;
+    void write_output_file(const PendingWrite& write, int writer_id) const;
     void write_all(int fd, const char* data, std::size_t len) const;
     void callback_until_success(const EncryptRequest& request) const;
 };
