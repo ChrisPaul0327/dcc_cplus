@@ -27,7 +27,7 @@ struct RuntimeConfig {
     std::size_t tile_rows = 100000;
     std::size_t early_max_buffered_jobs = 128;
     bool callback_enabled = true;
-    bool early_callback = false;
+    bool early_callback = true;
 };
 
 struct QueuedJob {

@@ -118,7 +118,7 @@ def main():
     ap.add_argument('--url', default='http://127.0.0.1:8080/encrypt')
     ap.add_argument('--callback-host', default='127.0.0.1')
     ap.add_argument('--callback-port', type=int, default=18081)
-    ap.add_argument('--output-dir', default='/opt/app/dcc/team106/output')
+    ap.add_argument('--output-dir', default='/opt/app/dcc/team012/output')
     ap.add_argument('--requests', type=int, default=100)
     ap.add_argument('--concurrency', type=int, default=100)
     ap.add_argument('--timeout', type=int, default=7200)

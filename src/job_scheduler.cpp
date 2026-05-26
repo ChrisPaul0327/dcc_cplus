@@ -138,7 +138,7 @@ RuntimeConfig runtime_config_from_env() {
     cfg.tile_rows = getenv_size_or("DCC_TILE_ROWS", 100000);
     cfg.early_max_buffered_jobs = getenv_size_or("DCC_EARLY_MAX_BUFFERED_JOBS", 128);
     cfg.callback_enabled = getenv_or("DCC_DISABLE_CALLBACK", "0") != "1";
-    cfg.early_callback = getenv_or("DCC_EARLY_CALLBACK", "0") == "1";
+    cfg.early_callback = getenv_or("DCC_EARLY_CALLBACK", "1") != "0";
     return cfg;
 }
 
