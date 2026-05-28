@@ -73,12 +73,13 @@ curl -s -X POST http://127.0.0.1:18080/encrypt \
 ## Timing Logs
 
 The service writes timing diagnostics to stderr, so the submit command redirects
-them into `dcc.log`. Each request emits `timing requestId=...` lines for queue
-wait, data load, field resolution, SM4 key schedule, render, callback,
-background writer queue wait, file write, rename, and total time. Example:
+them into `dcc.log`. Each request emits `timing requestId=...` lines with Chinese
+stage names for queue wait, data load, field resolution, SM4 key schedule,
+render, callback, background writer queue wait, file write, rename, and total
+time. Example:
 
 ```text
-timing requestId=REQ_1 stage=render_to_memory start="2026-05-26 10:20:06.053" end="2026-05-26 10:20:06.331" ms=277.855 rows=300000 bytes=42123456 fieldCount=4
+timing requestId=REQ_1 阶段=渲染到内存 start="2026-05-26 10:20:06.053" end="2026-05-26 10:20:06.331" ms=277.855 rows=300000 bytes=42123456 fieldCount=4
 ```
 
 ## Submit Command Template

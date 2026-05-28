@@ -91,7 +91,7 @@ void log_timing(const std::string& request_id,
                 const std::string& extra = {}) {
     std::ostringstream line;
     line << "timing requestId=" << request_id
-         << " stage=" << stage
+         << " 阶段=" << stage
          << " start=\"" << format_wall_time(start_wall) << "\""
          << " end=\"" << format_wall_time(end_wall) << "\""
          << " ms=" << std::fixed << std::setprecision(3) << elapsed_ms(start_steady, end_steady);
@@ -268,7 +268,7 @@ void JobScheduler::enqueue(EncryptRequest request) {
     cv_.notify_one();
     const auto enqueue_end_steady = std::chrono::steady_clock::now();
     const auto enqueue_end_wall = std::chrono::system_clock::now();
-    log_timing(request_id, "enqueue",
+    log_timing(request_id, "入队",
                enqueue_start_wall, enqueue_end_wall,
                enqueue_start_steady, enqueue_end_steady,
                "priority=" + std::to_string(priority) +
@@ -312,7 +312,7 @@ void JobScheduler::worker_loop(int worker_id) {
         }
         const auto dequeue_steady = std::chrono::steady_clock::now();
         const auto dequeue_wall = std::chrono::system_clock::now();
-        log_timing(job.request.request_id, "queue_wait",
+        log_timing(job.request.request_id, "排队等待",
                    job.enqueue_wall, dequeue_wall,
                    job.enqueue_steady, dequeue_steady,
                    "worker=" + std::to_string(worker_id));
@@ -338,7 +338,7 @@ void JobScheduler::writer_loop(int writer_id) {
             try {
                 const auto dequeue_steady = std::chrono::steady_clock::now();
                 const auto dequeue_wall = std::chrono::system_clock::now();
-                log_timing(write.request_id, "write_queue_wait",
+                log_timing(write.request_id, "写盘队列等待",
                            write.enqueue_wall, dequeue_wall,
                            write.enqueue_steady, dequeue_steady,
                            "writer=" + std::to_string(writer_id) +
@@ -358,7 +358,7 @@ void JobScheduler::writer_loop(int writer_id) {
 void JobScheduler::process_with_retry(const EncryptRequest& request, int worker_id) {
     for (;;) {
         try {
-            log_timing_now(request.request_id, "worker_start", "worker=" + std::to_string(worker_id));
+            log_timing_now(request.request_id, "工作线程开始", "worker=" + std::to_string(worker_id));
             process_once(request);
             return;
         } catch (const std::exception& e) {
@@ -388,7 +388,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
     ensure_data_loaded();
     auto stage_end = std::chrono::steady_clock::now();
     auto stage_end_wall = std::chrono::system_clock::now();
-    log_timing(request.request_id, "ensure_data_loaded",
+    log_timing(request.request_id, "确保数据加载",
                stage_start_wall, stage_end_wall, stage_start, stage_end,
                "rows=" + std::to_string(store_.row_count()));
 
@@ -397,7 +397,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
     const auto fields = store_.resolve_fields(request.fields);
     stage_end = std::chrono::steady_clock::now();
     stage_end_wall = std::chrono::system_clock::now();
-    log_timing(request.request_id, "resolve_fields",
+    log_timing(request.request_id, "解析字段",
                stage_start_wall, stage_end_wall, stage_start, stage_end,
                "fieldCount=" + std::to_string(fields.size()));
 
@@ -407,7 +407,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
     sm4_set_encrypt_key(reinterpret_cast<const unsigned char*>(request.sm4_key.data()), schedule);
     stage_end = std::chrono::steady_clock::now();
     stage_end_wall = std::chrono::system_clock::now();
-    log_timing(request.request_id, "sm4_key_schedule",
+    log_timing(request.request_id, "SM4密钥调度",
                stage_start_wall, stage_end_wall, stage_start, stage_end);
 
     stage_start = std::chrono::steady_clock::now();
@@ -415,7 +415,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
     std::filesystem::create_directories(config_.output_dir);
     stage_end = std::chrono::steady_clock::now();
     stage_end_wall = std::chrono::system_clock::now();
-    log_timing(request.request_id, "create_output_dir",
+    log_timing(request.request_id, "创建输出目录",
                stage_start_wall, stage_end_wall, stage_start, stage_end,
                "dir=" + config_.output_dir);
 
@@ -429,7 +429,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
         stage_end = std::chrono::steady_clock::now();
         stage_end_wall = std::chrono::system_clock::now();
         const std::size_t rendered_bytes = rendered.size();
-        log_timing(request.request_id, "render_to_memory",
+        log_timing(request.request_id, "渲染到内存",
                    stage_start_wall, stage_end_wall, stage_start, stage_end,
                    "rows=" + std::to_string(store_.row_count()) +
                        " bytes=" + std::to_string(rendered_bytes) +
@@ -440,7 +440,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
         callback_until_success(request);
         stage_end = std::chrono::steady_clock::now();
         stage_end_wall = std::chrono::system_clock::now();
-        log_timing(request.request_id, "callback",
+        log_timing(request.request_id, "回调",
                    stage_start_wall, stage_end_wall, stage_start, stage_end,
                    "url=" + config_.callback_url);
 
@@ -449,7 +449,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
         enqueue_write(PendingWrite{request.request_id, final_path, tmp_path, std::move(rendered), {}, {}});
         stage_end = std::chrono::steady_clock::now();
         stage_end_wall = std::chrono::system_clock::now();
-        log_timing(request.request_id, "enqueue_background_write",
+        log_timing(request.request_id, "加入后台写盘队列",
                    stage_start_wall, stage_end_wall, stage_start, stage_end,
                    "bytes=" + std::to_string(rendered_bytes));
         const auto job_end = std::chrono::steady_clock::now();
@@ -457,7 +457,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
         std::cerr << "job callback-complete requestId=" << request.request_id
                   << " ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(job_end - job_start).count()
                   << "\n";
-        log_timing(request.request_id, "job_callback_path_total",
+        log_timing(request.request_id, "早回调路径总耗时",
                    job_start_wall, job_end_wall, job_start, job_end,
                    "rows=" + std::to_string(store_.row_count()) +
                        " bytes=" + std::to_string(rendered_bytes) +
@@ -473,7 +473,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
     if (fd < 0) {
         throw std::runtime_error("failed to open output file: " + tmp_path + ": " + std::strerror(errno));
     }
-    log_timing(request.request_id, "file_open",
+    log_timing(request.request_id, "打开文件",
                stage_start_wall, stage_end_wall, stage_start, stage_end,
                "path=" + tmp_path);
 
@@ -517,7 +517,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
         }
         stage_end = std::chrono::steady_clock::now();
         stage_end_wall = std::chrono::system_clock::now();
-        log_timing(request.request_id, "render_and_write_tiles",
+        log_timing(request.request_id, "分块渲染并写盘",
                    stage_start_wall, stage_end_wall, stage_start, stage_end,
                    "rows=" + std::to_string(total_rows) +
                        " bytes=" + std::to_string(rendered_bytes) +
@@ -531,7 +531,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
         }
         stage_end = std::chrono::steady_clock::now();
         stage_end_wall = std::chrono::system_clock::now();
-        log_timing(request.request_id, "file_close",
+        log_timing(request.request_id, "关闭文件",
                    stage_start_wall, stage_end_wall, stage_start, stage_end,
                    "path=" + tmp_path);
     } catch (...) {
@@ -546,7 +546,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
     }
     stage_end = std::chrono::steady_clock::now();
     stage_end_wall = std::chrono::system_clock::now();
-    log_timing(request.request_id, "file_rename",
+    log_timing(request.request_id, "重命名文件",
                stage_start_wall, stage_end_wall, stage_start, stage_end,
                "finalPath=" + final_path);
 
@@ -556,7 +556,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
     callback_until_success(request);
     stage_end = std::chrono::steady_clock::now();
     stage_end_wall = std::chrono::system_clock::now();
-    log_timing(request.request_id, "callback",
+    log_timing(request.request_id, "回调",
                stage_start_wall, stage_end_wall, stage_start, stage_end,
                "url=" + config_.callback_url);
     const auto job_end = std::chrono::steady_clock::now();
@@ -564,7 +564,7 @@ void JobScheduler::process_once(const EncryptRequest& request) {
     std::cerr << "job complete requestId=" << request.request_id
               << " ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(job_end - job_start).count()
               << "\n";
-    log_timing(request.request_id, "job_conservative_path_total",
+    log_timing(request.request_id, "保守路径总耗时",
                job_start_wall, job_end_wall, job_start, job_end,
                "rows=" + std::to_string(total_rows) +
                    " bytes=" + std::to_string(rendered_bytes) +
@@ -636,7 +636,7 @@ void JobScheduler::write_output_file(const PendingWrite& write, int writer_id) c
     std::filesystem::create_directories(config_.output_dir);
     auto stage_end = std::chrono::steady_clock::now();
     auto stage_end_wall = std::chrono::system_clock::now();
-    log_timing(write.request_id, "writer_create_output_dir",
+    log_timing(write.request_id, "写线程创建输出目录",
                stage_start_wall, stage_end_wall, stage_start, stage_end,
                "writer=" + std::to_string(writer_id) +
                    " dir=" + config_.output_dir);
@@ -649,7 +649,7 @@ void JobScheduler::write_output_file(const PendingWrite& write, int writer_id) c
     if (fd < 0) {
         throw std::runtime_error("failed to open output file: " + write.tmp_path + ": " + std::strerror(errno));
     }
-    log_timing(write.request_id, "writer_file_open",
+    log_timing(write.request_id, "写线程打开文件",
                stage_start_wall, stage_end_wall, stage_start, stage_end,
                "writer=" + std::to_string(writer_id) +
                    " path=" + write.tmp_path);
@@ -660,7 +660,7 @@ void JobScheduler::write_output_file(const PendingWrite& write, int writer_id) c
         write_all(fd, write.data.data(), write.data.size());
         stage_end = std::chrono::steady_clock::now();
         stage_end_wall = std::chrono::system_clock::now();
-        log_timing(write.request_id, "writer_file_write",
+        log_timing(write.request_id, "写线程写文件",
                    stage_start_wall, stage_end_wall, stage_start, stage_end,
                    "writer=" + std::to_string(writer_id) +
                        " bytes=" + std::to_string(write.data.size()));
@@ -672,7 +672,7 @@ void JobScheduler::write_output_file(const PendingWrite& write, int writer_id) c
         }
         stage_end = std::chrono::steady_clock::now();
         stage_end_wall = std::chrono::system_clock::now();
-        log_timing(write.request_id, "writer_file_close",
+        log_timing(write.request_id, "写线程关闭文件",
                    stage_start_wall, stage_end_wall, stage_start, stage_end,
                    "writer=" + std::to_string(writer_id) +
                        " path=" + write.tmp_path);
@@ -688,14 +688,14 @@ void JobScheduler::write_output_file(const PendingWrite& write, int writer_id) c
     }
     stage_end = std::chrono::steady_clock::now();
     stage_end_wall = std::chrono::system_clock::now();
-    log_timing(write.request_id, "writer_file_rename",
+    log_timing(write.request_id, "写线程重命名文件",
                stage_start_wall, stage_end_wall, stage_start, stage_end,
                "writer=" + std::to_string(writer_id) +
                    " finalPath=" + write.final_path);
 
     const auto total_end_steady = std::chrono::steady_clock::now();
     const auto total_end_wall = std::chrono::system_clock::now();
-    log_timing(write.request_id, "writer_total",
+    log_timing(write.request_id, "写线程总耗时",
                total_start_wall, total_end_wall, total_start_steady, total_end_steady,
                "writer=" + std::to_string(writer_id) +
                    " bytes=" + std::to_string(write.data.size()));
